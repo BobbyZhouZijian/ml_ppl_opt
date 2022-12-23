@@ -1,91 +1,141 @@
+import copy
+import inspect
+import warnings
+import numbers
+
+from sklearn.utils import check_random_state
+try:
+    from collections.abc import Iterable
+except ImportError:
+    from collections import Iterable
 import numpy as np
-from scipy.optimize import minimize
-from scipy.stats import norm
+from optimizer import Optimizer
+from skopt.callbacks import check_callback, VerboseCallback
+from skopt.utils import eval_callbacks, normalize_dimensions, cook_estimator
 
-class BayesOpt:
-    def __init__(self, func, bounds, x_init, model):
-        self.func = func
-        self.bounds = bounds
-        self.x_init = x_init
-        self.gpr = model
-    
-    def run(self, n_iters, fixed_dim=None):
-        X_sample = self.x_init
-        Y_sample = [self.func(x) for x in X_sample]
-        for _ in range(n_iters):
-            # Update Gaussian process with existing samples
-            self.gpr.fit(X_sample, Y_sample)
+def custom_minimize(func, dimensions,
+                  n_calls=100, n_random_starts=None,
+                  n_initial_points=10,
+                  initial_point_generator="random",
+                  acq_func="EI", acq_optimizer="lbfgs",
+                  x0=None, y0=None, random_state=None, verbose=False,
+                  callback=None, n_points=10000, n_restarts_optimizer=5,
+                  xi=0.01, kappa=1.96, noise="gaussian", n_jobs=1, model_queue_size=None):
 
-            # Obtain next sampling point from the acquisition function (expected_improvement)
-            X_next = propose_location(expected_improvement, X_sample, Y_sample, self.gpr, self.bounds, fixed_dim)
-            
-            # Obtain next noisy sample from the objective function
-            Y_next = self.func(X_next)
-            
-            # Add sample to previous samples
-            X_sample = np.vstack((X_sample, X_next))
-            Y_sample = np.vstack((Y_sample, Y_next))
-        return X_sample, Y_sample
+    # Check params
+    rng = check_random_state(random_state)
+    space = normalize_dimensions(dimensions)
 
-def expected_improvement(X, X_sample, Y_sample, gpr, xi=0.01):
-    '''
-    Computes the EI at points X based on existing samples X_sample
-    and Y_sample using a Gaussian process surrogate model.
-    
-    Args:
-        X: Points at which EI shall be computed (m x d).
-        X_sample: Sample locations (n x d).
-        Y_sample: Sample values (n x 1).
-        gpr: A GaussianProcessRegressor fitted to samples.
-        xi: Exploitation-exploration trade-off parameter.
-    
-    Returns:
-        Expected improvements at points X.
-    '''
-    mu, sigma = gpr.predict(X, return_std=True)
-    mu_sample = gpr.predict(X_sample)
+    base_estimator = cook_estimator(
+        "GP", space=space, random_state=rng.randint(0, np.iinfo(np.int32).max),
+        noise=noise)
 
-    sigma = sigma.reshape(-1, 1)
-    
-    # Needed for noise-based model,
-    # otherwise use np.max(Y_sample).
-    # See also section 2.4 in [1]
-    mu_sample_opt = np.max(mu_sample)
+    specs = {"args": copy.copy(inspect.currentframe().f_locals),
+             "function": inspect.currentframe().f_code.co_name}
 
-    with np.errstate(divide='warn'):
-        imp = mu - mu_sample_opt - xi
-        Z = imp / sigma
-        ei = imp * norm.cdf(Z) + sigma * norm.pdf(Z)
-        ei[sigma == 0.0] = 0.0
+    acq_optimizer_kwargs = {
+        "n_points": n_points, "n_restarts_optimizer": n_restarts_optimizer,
+        "n_jobs": n_jobs}
+    acq_func_kwargs = {"xi": xi, "kappa": kappa}
 
-    return ei
+    # Initialize optimization
+    # Suppose there are points provided (x0 and y0), record them
 
-def propose_location(acquisition, X_sample, Y_sample, gpr, space, n_restarts=25):
-    '''
-    Proposes the next sampling point by optimizing the acquisition function.
-    
-    Args:
-        acquisition: Acquisition function.
-        X_sample: Sample locations (n x d).
-        Y_sample: Sample values (n x 1).
-        gpr: A GaussianProcessRegressor fitted to samples.
+    # check x0: list-like, requirement of minimal points
+    if x0 is None:
+        x0 = []
+    elif not isinstance(x0[0], (list, tuple)):
+        x0 = [x0]
+    if not isinstance(x0, list):
+        raise ValueError("`x0` should be a list, but got %s" % type(x0))
 
-    Returns:
-        Location of the acquisition function maximum.
-    '''
-    dim = X_sample.shape[1]
-    min_val = 1
-    min_x = None
+    # Check `n_random_starts` deprecation first
+    if n_random_starts is not None:
+        warnings.warn(("n_random_starts will be removed in favour of "
+                       "n_initial_points. It overwrites n_initial_points."),
+                      DeprecationWarning)
+        n_initial_points = n_random_starts
 
-    def min_obj(X):
-        # Minimization objective is the negative acquisition function
-        return -acquisition(X.reshape(-1, dim), X_sample, Y_sample, gpr)
-    
-    # Find the best optimum by starting from n_restart different random points.
-    for x0 in space.transform(space.rvs(n_restarts)):
-        res = minimize(min_obj, x0=x0, bounds=space.transformed_bounds, method='L-BFGS-B')       
-        if res.fun < min_val:
-            min_val = res.fun
-            min_x = res.x           
-            
-    return space.inverse_transform(min_x.reshape((1, -1)))[0]
+    if n_initial_points <= 0 and not x0:
+        raise ValueError("Either set `n_initial_points` > 0,"
+                         " or provide `x0`")
+    # check y0: list-like, requirement of maximal calls
+    if isinstance(y0, Iterable):
+        y0 = list(y0)
+    elif isinstance(y0, numbers.Number):
+        y0 = [y0]
+    # required_calls = n_initial_points + (len(x0) if not y0 else 0)
+    required_calls = n_initial_points
+    if n_calls < required_calls:
+        raise ValueError(
+            "Expected `n_calls` >= %d, got %d" % (required_calls, n_calls))
+    # calculate the total number of initial points
+    n_initial_points = n_initial_points + len(x0)
+
+    # Build optimizer
+
+    # create optimizer class
+    optimizer = Optimizer(dimensions, base_estimator,
+                          n_initial_points=n_initial_points,
+                          initial_point_generator=initial_point_generator,
+                          n_jobs=n_jobs,
+                          acq_func=acq_func, acq_optimizer=acq_optimizer,
+                          random_state=random_state,
+                          model_queue_size=model_queue_size,
+                          acq_optimizer_kwargs=acq_optimizer_kwargs,
+                          acq_func_kwargs=acq_func_kwargs)
+    # check x0: element-wise data type, dimensionality
+    assert all(isinstance(p, Iterable) for p in x0)
+    if not all(len(p) == optimizer.space.n_dims for p in x0):
+        raise RuntimeError("Optimization space (%s) and initial points in x0 "
+                           "use inconsistent dimensions." % optimizer.space)
+    # check callback
+    callbacks = check_callback(callback)
+    if verbose:
+        callbacks.append(VerboseCallback(
+            n_init=len(x0) if not y0 else 0,
+            n_random=n_initial_points,
+            n_total=n_calls))
+
+    # Record provided points
+
+    # create return object
+    result = None
+    # evaluate y0 if only x0 is provided
+    if x0 and y0 is None:
+        y0 = list(map(func, x0))
+        n_calls -= len(y0)
+    # record through tell function
+    if x0:
+        if not (isinstance(y0, Iterable) or isinstance(y0, numbers.Number)):
+            raise ValueError(
+                "`y0` should be an iterable or a scalar, got %s" % type(y0))
+        if len(x0) != len(y0):
+            raise ValueError("`x0` and `y0` should have the same length")
+        result = optimizer.tell(x0, y0)
+        result.specs = specs
+        if eval_callbacks(callbacks, result):
+            return result
+
+    # Optimize
+    for n in range(n_calls):
+        next_x = optimizer.ask()
+        next_y = func(next_x)
+        result = optimizer.tell(next_x, next_y)
+        result.specs = specs
+        if eval_callbacks(callbacks, result):
+            break
+
+    return result, optimizer
+
+def resume_optimize(n_calls, func, optimizer, specs, callback=None, fixed_dim=None):
+    callbacks = check_callback(callback)
+    for n in range(n_calls):
+        next_x = optimizer.ask()
+        next_y = func(next_x)
+        result = optimizer.tell(next_x, next_y, fixed_dim=fixed_dim)
+        result.specs = specs
+        if eval_callbacks(callbacks, result):
+            break
+
+    return result, optimizer

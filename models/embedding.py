@@ -1,6 +1,6 @@
 import torch.nn as nn
 
-from activations import GeLU
+from models.activations import GeLU
 
 __all__ = ['CNN']
 
