@@ -2,17 +2,22 @@
 from bayes_opt import custom_minimize, resume_optimize
 
 class AgentBase:
-    def __init__(self, random_seed=2023):
-        self.punish = 0
+    def __init__(self, dim, delta=1.0, random_seed=2023):
+        self.punish_count = 0
+        self.dim = dim
+        self.delta = delta
         self.random_seed = random_seed
     
+    @property
+    def need_punish(self):
+        return self.punish_count < 2
+
     def initialize_model(self, 
                     func,
                     space,
                     x0,
                     initial_point_generator="grid", 
                     acq_func="EI", 
-                    n_calls=5, 
                     n_random_starts=5
         ):
 
@@ -21,7 +26,7 @@ class AgentBase:
                     initial_point_generator=initial_point_generator,
                     x0=x0,
                     acq_func=acq_func,      # the acquisition function
-                    n_calls=n_calls,         # the number of evaluations of f
+                    n_calls=n_random_starts,         # the number of evaluations of f
                     n_random_starts=n_random_starts,  # the number of random initialization points
                     noise="gaussian",       # the noise level (optional)
                     n_jobs=-1,
@@ -29,6 +34,13 @@ class AgentBase:
                 )   # the random seed
         return res, optimizer
     
-    def update(self, func, n_points, res_resume, optimizer, fixed_dim=None):
-        res_resume, optimizer = resume_optimize(n_points, func, optimizer, res_resume.specs, fixed_dim=fixed_dim)
-        return res_resume, optimizer
+    def update(self, func, n_points, res_resume, optimizer, other_dim, other_val):
+        fixed_dim = (other_dim, other_val)
+        res_resume, optimizer, xs, ys = resume_optimize(n_points, func, optimizer, res_resume.specs, fixed_dim=fixed_dim)
+        return res_resume, optimizer, xs, ys
+    
+    def has_improvement(self, next_res=None, prev_res=None):
+        if next_res is None or prev_res is None:
+            return True
+        # assuming minimization
+        return prev_res.fun - next_res.fun > self.delta

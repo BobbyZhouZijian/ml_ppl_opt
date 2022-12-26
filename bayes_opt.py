@@ -129,13 +129,22 @@ def custom_minimize(func, dimensions,
     return result, optimizer
 
 def resume_optimize(n_calls, func, optimizer, specs, callback=None, fixed_dim=None):
+    xs = []
+    ys = []
     callbacks = check_callback(callback)
     for n in range(n_calls):
         next_x = optimizer.ask()
+        if fixed_dim is not None:
+            next_x[fixed_dim[0]] = fixed_dim[1]
         next_y = func(next_x)
+
+        xs.append(next_x)
+        ys.append(next_y)
+
         result = optimizer.tell(next_x, next_y, fixed_dim=fixed_dim)
         result.specs = specs
         if eval_callbacks(callbacks, result):
             break
+        
 
-    return result, optimizer
+    return result, optimizer, xs, ys
