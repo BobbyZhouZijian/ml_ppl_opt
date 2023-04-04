@@ -4,6 +4,7 @@ import warnings
 import numbers
 
 from sklearn.utils import check_random_state
+
 try:
     from collections.abc import Iterable
 except ImportError:
@@ -13,15 +14,15 @@ from optimizer import Optimizer
 from skopt.callbacks import check_callback, VerboseCallback
 from skopt.utils import eval_callbacks, normalize_dimensions, cook_estimator
 
-def custom_minimize(func, dimensions,
-                  n_calls=100, n_random_starts=None,
-                  n_initial_points=10,
-                  initial_point_generator="random",
-                  acq_func="EI", acq_optimizer="lbfgs",
-                  x0=None, y0=None, random_state=None, verbose=False,
-                  callback=None, n_points=10000, n_restarts_optimizer=5,
-                  xi=0.01, kappa=1.96, noise="gaussian", n_jobs=1, model_queue_size=None):
 
+def custom_minimize(func, dimensions,
+                    n_calls=100, n_random_starts=None,
+                    n_initial_points=10,
+                    initial_point_generator="random",
+                    acq_func="EI", acq_optimizer="lbfgs",
+                    x0=None, y0=None, random_state=None, verbose=False,
+                    callback=None, n_points=10000, n_restarts_optimizer=5,
+                    xi=0.01, kappa=1.96, noise="gaussian", n_jobs=1, model_queue_size=None):
     # Check params
     rng = check_random_state(random_state)
     space = normalize_dimensions(dimensions)
@@ -128,6 +129,7 @@ def custom_minimize(func, dimensions,
 
     return result, optimizer
 
+
 def resume_optimize(n_calls, func, optimizer, specs, callback=None, fixed_dim=None):
     xs = []
     ys = []
@@ -135,7 +137,9 @@ def resume_optimize(n_calls, func, optimizer, specs, callback=None, fixed_dim=No
     for n in range(n_calls):
         next_x = optimizer.ask()
         if fixed_dim is not None:
-            next_x[fixed_dim[0]] = fixed_dim[1]
+            nx = np.asarray(next_x)
+            nx[fixed_dim[0]] = fixed_dim[1]
+            next_x = nx.tolist()
         next_y = func(next_x)
 
         xs.append(next_x)
@@ -145,6 +149,5 @@ def resume_optimize(n_calls, func, optimizer, specs, callback=None, fixed_dim=No
         result.specs = specs
         if eval_callbacks(callbacks, result):
             break
-        
 
     return result, optimizer, xs, ys
